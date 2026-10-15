@@ -40,6 +40,12 @@ You also need **one backend** — `web` (default, drives your logged-in Chrome, 
 
 ## Usage
 
+For the HTTP service used by IA Design in `sistema-imprenta`, see
+[API setup, persistent ChatGPT login and troubleshooting](docs/api.md).
+The included Docker Compose configuration keeps the service's login across
+container restarts. `IMAGEGEN_API_TOKEN` authenticates the ERP to this service;
+the CLI also needs its own valid ChatGPT session.
+
 ```bash
 chatgpt-imagegen "moody mountain sunset" -o web/hero.png --size 1536x1024
 chatgpt-imagegen "make it a warm golden-hour photo, cinematic 35mm" -i photo.jpg   # edit a reference

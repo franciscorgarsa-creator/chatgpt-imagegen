@@ -109,8 +109,15 @@ OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # Codex CLI's published client id
 FALLBACK_VERSION = "0.130.0"
 FALLBACK_UA = f"codex_cli_rs/{FALLBACK_VERSION} (Mac OS 26.0.1; arm64) chatgpt-imagegen"
-AUTH_PATH = Path.home() / ".codex" / "auth.json"
-VERSION_PATH = Path.home() / ".codex" / "version.json"
+def _codex_auth_directory() -> Path:
+    # Allow a dedicated ImageGen login and honour the official CLI's directory
+    # without changing HOME or overwriting the platform's Codex session.
+    configured = os.environ.get("IMAGEGEN_CODEX_AUTH_DIR") or os.environ.get("CODEX_HOME")
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+
+AUTH_PATH = _codex_auth_directory() / "auth.json"
+VERSION_PATH = _codex_auth_directory() / "version.json"
 
 # Self-update reminder. `skills add` has no auto-update and surfaces no "new
 # version" notice, so we do it ourselves: once a day, best-effort, read the
@@ -202,7 +209,7 @@ class AnimationError(RuntimeError):
 def _load_auth() -> JsonDict:
     if not AUTH_PATH.exists():
         sys.exit(
-            f"~/.codex/auth.json not found.\n"
+            f"{AUTH_PATH} not found.\n"
             f"Install Codex CLI (`npm i -g @openai/codex`) and run `codex login` first."
         )
     try:
@@ -384,6 +391,8 @@ def _sniff_mime(data: bytes) -> str | None:
         return "image/jpeg"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
     return None
 
 
@@ -459,7 +468,7 @@ def _load_reference(ref: str) -> tuple[str, str]:
 
         mime = _sniff_mime(raw)
         if mime is None:
-            sys.exit(f"unsupported reference image type for {ref!r} (need PNG, JPEG, or WEBP)")
+            sys.exit(f"unsupported reference image type for {ref!r} (need PNG, JPEG, WEBP, or GIF)")
 
         b64 = base64.b64encode(raw).decode("ascii")
         if len(b64) > REF_B64_BUDGET:
@@ -2239,7 +2248,7 @@ def run_codex(
     access, account_id, refresh = _extract_access_token(auth)
     if not access:
         sys.exit(
-            "no ChatGPT OAuth access_token in ~/.codex/auth.json. "
+            f"no ChatGPT OAuth access_token in {AUTH_PATH}. "
             "Run `codex login` to sign into your ChatGPT subscription. "
             "(An OPENAI_API_KEY in this file is not a substitute — the backend "
             "requires a subscription OAuth token.)"
@@ -3796,7 +3805,7 @@ def _doctor_command(argv: list[str]) -> int:
 
     codex_ready = _codex_token_present()
     line("ok" if codex_ready else "fail", "codex",
-         "OAuth token present (~/.codex/auth.json)" if codex_ready
+         f"OAuth token present ({AUTH_PATH})" if codex_ready
          else "no token — run `codex login`")
 
     print("\n  animation:")
