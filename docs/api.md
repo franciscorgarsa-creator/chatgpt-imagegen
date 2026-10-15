@@ -12,8 +12,9 @@ Dockerfile de este repositorio:
 1. Configura `IMAGEGEN_API_TOKEN` como variable privada de la app y usa el mismo
    valor para `IMAGEGEN_TOKEN` en la app del ERP. Configura
    `CHATGPT_IMAGEGEN_BACKEND=codex`.
-   Si la cuenta rechaza el modelo predeterminado `gpt-5.5`, configura también
-   `CHATGPT_IMAGEGEN_MODEL=gpt-5.4` (o un modelo disponible para esa cuenta).
+   Configura `CHATGPT_IMAGEGEN_MODEL` con un modelo confirmado para esa cuenta.
+   Si la cuenta rechaza `gpt-5.5` o `gpt-5.4`, consulta primero el catálogo
+   siguiendo el apartado de diagnóstico de modelos de este documento.
    El CLI ya respeta esta variable, incluso con la versión original de la API.
 2. Añade volúmenes persistentes con destino `/root/.codex` y `/data`. El primero
    conserva el inicio de sesión y su renovación; el segundo, la configuración.
@@ -72,8 +73,9 @@ directorio. Configura `IMAGEGEN_API_TOKEN` en el proceso del servidor.
 - `CHATGPT_IMAGEGEN_BACKEND`: `codex` por defecto en la API; también acepta
   `auto` y `web` cuando ese backend ya esté preparado en la máquina.
 - `CHATGPT_IMAGEGEN_MODEL`: modelo Codex disponible para la cuenta ChatGPT del
-  servicio. Sin esta variable el CLI usa `gpt-5.5`; si la cuenta lo rechaza,
-  prueba `gpt-5.4`. Un HTTP 400 por modelo no compatible no es un timeout.
+  servicio. Sin esta variable el CLI usa `gpt-5.5`. Consulta el catálogo antes
+  de elegir un sustituto: `gpt-5.4` tampoco está disponible para todas las cuentas.
+  Un HTTP 400 por modelo no compatible no es un timeout.
 - `IMAGEGEN_CLI_PATH`: ruta opcional a otra instalación del script Python.
 - `XDG_CONFIG_HOME`: directorio escribible para la configuración del CLI cuando
   el directorio predeterminado del usuario no se pueda escribir.
@@ -113,11 +115,44 @@ el proxy necesita admitir al menos 500. El tiempo inicial de conexión del CLI
 al proveedor sigue siendo de hasta 30 segundos. Los fallos se registran con
 código y segundos transcurridos, sin la salida privada del CLI.
 
-Para investigar un HTTP 500 inmediato de la API original, ejecuta en su contenedor:
+## Diagnóstico de modelos
+
+Un HTTP 400 que indica `model is not supported when using Codex with a ChatGPT
+account` requiere consultar los modelos de la sesión del servicio. Ejecuta este
+bloque completo en el contenedor de ImageGen. Utiliza las mismas funciones de
+autenticación del CLI y muestra únicamente los nombres del catálogo, sin imprimir
+tokens ni el contenido de `auth.json`:
 
 ```bash
-python /app/chatgpt-imagegen "Un círculo azul sobre fondo blanco" --backend codex --model gpt-5.4 --size 1024x1024 --format png --timeout 420 --quiet -o /tmp/ia-prueba.png
+python - <<'PY'
+import json, runpy, urllib.request, urllib.error
+cli = runpy.run_path('/app/chatgpt-imagegen')
+token, account, _ = cli['_extract_access_token'](cli['_load_auth']())
+version = cli['_detect_codex_version']()
+headers = cli['_build_headers'](token, account, version)
+headers['Accept'] = 'application/json'
+url = cli['CODEX_BACKEND'].rsplit('/', 1)[0] + '/models?client_version=' + version
+try:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30, context=cli['_ssl_ctx']()) as response:
+        data = json.load(response)
+    print('\n'.join(model['slug'] for model in data.get('models', []) if isinstance(model, dict) and isinstance(model.get('slug'), str)) or 'No hay modelos disponibles')
+except urllib.error.HTTPError as error:
+    print('HTTP', error.code)
+PY
 ```
+
+Con un nombre devuelto por el catálogo, prueba una generación real. Sustituye
+`SLUG_DEL_CATALOGO` por ese nombre:
+
+```bash
+python /app/chatgpt-imagegen "Un círculo azul sobre fondo blanco" --backend codex --model SLUG_DEL_CATALOGO --size 1024x1024 --format png --timeout 420 --quiet -o /tmp/ia-prueba.png
+```
+
+Una entrada del catálogo no confirma por sí sola que ese modelo admita la
+herramienta de generación de imágenes. Cuando la prueba guarde una imagen,
+configura ese mismo nombre como `CHATGPT_IMAGEGEN_MODEL` en el Environment de la
+app ImageGen de Dokploy y vuelve a desplegarla. Verifica después el flujo desde
+IA Design, incluido el historial.
 
 La versión original devuelve stderr dentro de `detail`. Su línea normal de
 progreso contiene `timeout=420s`; no debe interpretarse como un timeout. La API
