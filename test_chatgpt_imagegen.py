@@ -67,8 +67,36 @@ class SniffMime(unittest.TestCase):
     def test_webp(self):
         self.assertEqual(cig._sniff_mime(b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP"), "image/webp")
 
+    def test_gif_references_supported_by_ia_design(self):
+        for signature in [b"GIF87a", b"GIF89a"]:
+            self.assertEqual(cig._sniff_mime(signature + b"\x00" * 8), "image/gif")
+
+    def test_gif_reference_is_encoded_for_the_backend(self):
+        import base64
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.gif"
+            contents = b"GIF89a" + b"\x00" * 8
+            path.write_bytes(contents)
+            encoded, mime = cig._load_reference(str(path))
+            self.assertEqual(mime, "image/gif")
+            self.assertEqual(base64.b64decode(encoded), contents)
+
     def test_unknown(self):
         self.assertIsNone(cig._sniff_mime(b"not an image at all"))
+
+
+class CodexAuthDirectory(unittest.TestCase):
+    def test_dedicated_imagegen_session_takes_precedence(self):
+        with unittest.mock.patch.dict(os.environ, {"IMAGEGEN_CODEX_AUTH_DIR": "/tmp/imagegen-login", "CODEX_HOME": "/tmp/platform-login"}):
+            self.assertEqual(cig._codex_auth_directory(), Path("/tmp/imagegen-login"))
+
+    def test_official_codex_directory_is_respected(self):
+        with unittest.mock.patch.dict(os.environ, {"IMAGEGEN_CODEX_AUTH_DIR": "", "CODEX_HOME": "/tmp/codex-login"}):
+            self.assertEqual(cig._codex_auth_directory(), Path("/tmp/codex-login"))
+
+    def test_default_directory_remains_compatible(self):
+        with unittest.mock.patch.dict(os.environ, {"IMAGEGEN_CODEX_AUTH_DIR": "", "CODEX_HOME": ""}):
+            self.assertEqual(cig._codex_auth_directory(), Path.home() / ".codex")
 
 
 class VersionTuple(unittest.TestCase):

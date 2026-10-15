@@ -27,6 +27,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 ENV HOME="/root"
 ENV CHATGPT_IMAGEGEN_BACKEND="codex"
 ENV CHATGPT_IMAGEGEN_NO_UPDATE_CHECK="1"
+ENV XDG_CONFIG_HOME="/data/config"
+
+RUN mkdir -p /data/config /root/.codex
+VOLUME ["/data", "/root/.codex"]
 
 EXPOSE 8000
 
