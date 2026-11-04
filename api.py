@@ -38,12 +38,37 @@ def authorize(authorization: str | None):
         fail(401, "imagegen_unauthorized", "Unauthorized")
 
 
+def failure_output(stderr: str) -> str:
+    # Discard timestamped progress lines, including the normal timeout=420s.
+    return "\n".join(line for line in stderr.splitlines() if not re.match(r"^\s*\[\s*\d+(?:\.\d+)?s\]", line))
+
+
+def generation_diagnostic(stderr: str) -> tuple[str, int | None]:
+    failure = failure_output(stderr)
+    status = re.search(r"^HTTP ([1-5][0-9]{2}):", failure, re.M)
+    if status:
+        return "provider_http", int(status.group(1))
+    for prefix, reason in (
+        ("backend failed mid-generation:", "provider_stream"),
+        ("no image returned.", "empty_response"),
+        ("network error contacting the image backend:", "network"),
+        ("backend returned invalid base64", "invalid_result"),
+    ):
+        if any(line.startswith(prefix) for line in failure.splitlines()):
+            return reason, None
+    return "cli_error", None
+
+
 def generation_failure(stderr: str):
     # Do not return CLI output: it can include prompts, paths and upstream bodies.
-    # Discard progress lines, which include a prompt preview and timeout=420s.
-    stderr = "\n".join(line for line in stderr.splitlines() if not re.match(r"^\s*\[\s*\d+(?:\.\d+)?s\]", line))
+    stderr = failure_output(stderr)
     if re.search(r"HTTP\s+(401|403)\b|auth\.json not found|no ChatGPT OAuth|no token|token refresh failed", stderr, re.I):
         fail(503, "imagegen_auth_required", "The ImageGen ChatGPT session must be renewed")
+    if re.search(
+        r'''^backend failed mid-generation: Complexity (['"])[^'"\r\n]+\1 is not supported for this image model\.''',
+        stderr, re.M,
+    ):
+        fail(503, "imagegen_complexity_unsupported", "The configured reasoning effort is not supported by the image model")
     if re.search(r"model is not supported when using Codex with a ChatGPT account", stderr, re.I):
         fail(503, "imagegen_model_unsupported", "The configured model is not supported by this ChatGPT account")
     if re.search(r"HTTP\s+429\b|rate.limit|quota", stderr, re.I):
@@ -145,7 +170,12 @@ async def generate(
             try:
                 generation_failure(result.stderr)
             except HTTPException as error:
-                logger.warning("ImageGen failed code=%s elapsed_seconds=%.1f", error.detail["code"], time.monotonic() - started)
+                reason, provider_status = generation_diagnostic(result.stderr)
+                logger.warning(
+                    "ImageGen failed code=%s elapsed_seconds=%.1f cli_exit_code=%d reason=%s provider_status=%s",
+                    error.detail["code"], time.monotonic() - started,
+                    result.returncode, reason, provider_status,
+                )
                 raise
         if not output_path.is_file():
             fail(502, "imagegen_invalid_image", "Image was not generated")

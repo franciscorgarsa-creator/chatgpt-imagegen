@@ -97,6 +97,7 @@ Los errores usan `{"detail":{"code":"...","message":"..."}}`:
 | 503 | imagegen_not_configured | Configurar token, ruta del CLI o backend. |
 | 503 | imagegen_auth_required | Renovar la sesión ChatGPT del servicio. |
 | 503 | imagegen_model_unsupported | Configurar CHATGPT_IMAGEGEN_MODEL con un modelo disponible para la cuenta. |
+| 503 | imagegen_complexity_unsupported | Desplegar el CLI actualizado, que omite el esfuerzo explícito para usar la configuración predeterminada del proveedor. |
 | 429 | imagegen_rate_limited | Esperar a que se restablezca la cuota. |
 | 504 | imagegen_timeout | Revisar la disponibilidad y los tiempos del proveedor. |
 | 504 | imagegen_stalled | Revisar la conexión entre ImageGen y el proveedor. |
@@ -111,17 +112,47 @@ durante una generación. Permite 420 segundos de generación y de silencio SSE,
 con un límite de 435 segundos para el proceso. El ERP espera hasta 450 segundos;
 el proxy necesita admitir al menos 500. El tiempo inicial de conexión del CLI
 al proveedor sigue siendo de hasta 30 segundos. Los fallos se registran con
-código y segundos transcurridos, sin la salida privada del CLI.
+código y segundos transcurridos, sin la salida privada del CLI. Si el proceso
+termina con error, el registro también incluye `cli_exit_code`, `reason` y
+`provider_status`. `reason` sólo puede ser `provider_http`, `provider_stream`,
+`empty_response`, `network`, `invalid_result` o `cli_error`; `provider_status`
+sólo contiene un estado HTTP entre 100 y 599 reconocido al inicio de una línea
+de error, o `None`. No se registran mensajes del proveedor, prompts ni tokens.
 
-Para investigar un HTTP 500 inmediato de la API original, ejecuta en su contenedor:
+Ante `imagegen_failed`, localiza la referencia mostrada en los logs del ERP y
+consulta los logs de ImageGen alrededor de la misma hora para ver esa categoría.
+En Dokploy usa los logs de la app ImageGen; si tienes acceso al host Docker:
 
 ```bash
-python /app/chatgpt-imagegen "Un círculo azul sobre fondo blanco" --backend codex --model gpt-5.4 --size 1024x1024 --format png --timeout 420 --quiet -o /tmp/ia-prueba.png
+docker logs --since 10m <contenedor-imagegen>
+```
+
+El rechazo `backend failed mid-generation: Complexity 'low' is not supported
+for this image model.` ocurre cuando el proveedor empieza la generación y
+rechaza el esfuerzo enviado por el CLI. Cambiarlo por `medium` o `high` puede
+seguir siendo rechazado. La corrección omite únicamente `reasoning.effort`, conserva
+`reasoning.summary` y deja al proveedor elegir su configuración predeterminada,
+tanto para generar desde texto como con referencias.
+Hay que desplegar el código actualizado de **ImageGen**; cambiar sólo variables
+del ERP no modifica ese payload. Este rechazo no requiere renovar la sesión ni
+cambiar el modelo de la cuenta.
+
+Tras desplegar ImageGen, comprueba una generación real con el comando siguiente
+y desde IA Design, incluido el guardado del resultado en el historial. Las
+pruebas locales con proveedor simulado no acreditan que el despliegue ya se haya
+actualizado ni que la generación de producción haya terminado correctamente.
+
+Ejecuta la prueba en el contenedor de ImageGen con su configuración actual; al
+omitir `--model` se conserva `CHATGPT_IMAGEGEN_MODEL` o el valor predeterminado
+del CLI:
+
+```bash
+python /app/chatgpt-imagegen "Un círculo azul sobre fondo blanco" --backend codex --size 1024x1024 --format png --timeout 420 --stall-timeout 420 --quiet --no-progress --no-style -o /tmp/ia-prueba.png
 ```
 
 La versión original devuelve stderr dentro de `detail`. Su línea normal de
 progreso contiene `timeout=420s`; no debe interpretarse como un timeout. La API
-actual clasifica la causa real y devuelve códigos estables.
+actual distingue los fallos reconocidos y devuelve códigos estables.
 
 ## Pruebas
 

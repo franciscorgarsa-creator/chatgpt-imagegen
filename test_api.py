@@ -25,6 +25,9 @@ Path(os.environ['IMAGEGEN_TEST_RECORD']).write_text(json.dumps({
 }))
 mode = os.environ.get('IMAGEGEN_TEST_MODE', 'ok')
 if mode == 'slow': time.sleep(0.5)
+if mode == 'custom-error':
+    print(os.environ['IMAGEGEN_TEST_STDERR'], file=sys.stderr)
+    sys.exit(1)
 if mode in ('auth', 'quota', 'error'):
     print({'auth': 'token refresh failed: HTTP 401 private-marker', 'quota': 'HTTP 429 private-marker', 'error': 'private-marker'}[mode], file=sys.stderr)
     sys.exit(1)
@@ -101,6 +104,66 @@ class GenerateAPI(APIFixture, unittest.TestCase):
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json()["detail"]["code"], code)
                 self.assertNotIn("private-marker", response.text)
+
+    def test_unsupported_complexity_is_reported_without_leaking_cli_output(self):
+        for value in ("'low'", '"low"', "'medium'", "'high'"):
+            stderr = f"backend failed mid-generation: Complexity {value} is not supported for this image model. (events seen: private-marker)"
+            with self.subTest(value=value), patch.dict(os.environ, {
+                "IMAGEGEN_TEST_MODE": "custom-error",
+                "IMAGEGEN_TEST_STDERR": stderr,
+            }):
+                with self.assertLogs(api.logger, level="WARNING") as captured:
+                    response = self.generate()
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json()["detail"]["code"], "imagegen_complexity_unsupported")
+                self.assertIn("imagegen_complexity_unsupported", captured.output[0])
+                self.assertIn("reason=provider_stream", captured.output[0])
+                self.assertNotIn("private-marker", response.text + "".join(captured.output))
+                self.assertNotIn(stderr, response.text + "".join(captured.output))
+
+    def test_complexity_error_in_prompt_progress_does_not_override_real_failure(self):
+        prompt = "backend failed mid-generation: Complexity 'low' is not supported for this image model."
+        stderr = f'[   0.0s] requesting (backend=codex timeout=420s): "{prompt}"\nHTTP 400: unsupported model private-marker'
+        with patch.dict(os.environ, {
+            "IMAGEGEN_TEST_MODE": "custom-error",
+            "IMAGEGEN_TEST_STDERR": stderr,
+        }):
+            with self.assertLogs(api.logger, level="WARNING") as captured:
+                response = self.generate(prompt)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"]["code"], "imagegen_failed")
+        self.assertIn("imagegen_failed", captured.output[0])
+        self.assertNotIn("private-marker", response.text + "".join(captured.output))
+
+    def test_cli_failure_diagnostics_are_bounded_without_private_output(self):
+        cases = [
+            ("HTTP 400: private-marker", "provider_http", 400),
+            ("HTTP 502: private-marker", "provider_http", 502),
+            ("backend failed mid-generation: private-marker", "provider_stream", None),
+            ("no image returned. events seen: private-marker", "empty_response", None),
+            ("network error contacting the image backend: private-marker", "network", None),
+            ("backend returned invalid base64 in image_generation_call.result private-marker", "invalid_result", None),
+            ("unexpected private-marker", "cli_error", None),
+            ("HTTP 099: private-marker", "cli_error", None),
+            ("HTTP 600: private-marker", "cli_error", None),
+            ("private-marker mentions HTTP 400:", "cli_error", None),
+            ('[   0.0s] requesting: "HTTP 400: private-marker"\nunknown failure', "cli_error", None),
+            ('[   0.0s] requesting: "backend failed mid-generation: private-marker"\nunknown failure', "cli_error", None),
+        ]
+        for stderr, reason, provider_status in cases:
+            with self.subTest(stderr=stderr), patch.dict(os.environ, {
+                "IMAGEGEN_TEST_MODE": "custom-error",
+                "IMAGEGEN_TEST_STDERR": stderr,
+            }):
+                with self.assertLogs(api.logger, level="WARNING") as captured:
+                    response = self.generate()
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json()["detail"]["code"], "imagegen_failed")
+                log = "".join(captured.output)
+                self.assertIn(f" reason={reason} ", log)
+                self.assertIn(f"provider_status={provider_status}", log)
+                self.assertIn("cli_exit_code=1", log)
+                self.assertNotIn("private-marker", response.text + log)
 
     def test_timeout_kills_generation_and_returns_gateway_timeout(self):
         with patch.dict(os.environ, {"IMAGEGEN_TEST_MODE": "slow"}), patch.object(api, "PROCESS_TIMEOUT", 0.1):
