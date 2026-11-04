@@ -11,6 +11,7 @@ Run:  python3 -m unittest test_chatgpt_imagegen -v
 
 import importlib.machinery
 import importlib.util
+import base64
 import io
 import json
 import os
@@ -1020,6 +1021,64 @@ class PromptWordingByKind(unittest.TestCase):
             "a cat", "auto", "png", "gpt-5.5",
             refs=[("Zm9v", "image/png")], n_character_refs=0, n_style_refs=1)
         self.assertEqual(payload["tool_choice"], "required")
+
+
+class CodexImageComplexity(unittest.TestCase):
+    """Exercise the transmitted payload and SSE image/error handling together."""
+
+    @contextmanager
+    def _provider(self):
+        requests = []
+
+        def urlopen(request, **kwargs):
+            payload = json.loads(request.data)
+            requests.append(payload)
+            reasoning = payload.get("reasoning", {})
+            if "effort" in reasoning:
+                effort = reasoning["effort"]
+                self.assertIn(effort, ("low", "medium", "high"))
+                event = {"type": "response.failed", "response": {"error": {
+                    "message": f"Complexity '{effort}' is not supported for this image model.",
+                }}}
+            else:
+                event = {"type": "response.output_item.done", "item": {
+                    "type": "image_generation_call", "status": "completed",
+                    "result": base64.b64encode(b"\x89PNG\r\n\x1a\nfixture-image").decode(),
+                }}
+            return io.BytesIO(f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode())
+
+        with unittest.mock.patch.object(cig.urllib.request, "urlopen", side_effect=urlopen):
+            yield requests
+
+    def _generate(self, payload):
+        started = cig.time.monotonic()
+        return cig._post_for_image(payload, {}, started + 5, started, 5, False)
+
+    def test_text_and_reference_generation_leave_provider_effort_unset_and_return_image(self):
+        for model in ("gpt-5.4", "gpt-5.5"):
+            for refs in (None, [("Zm9v", "image/png")]):
+                with self.subTest(model=model, references=bool(refs)), self._provider() as requests:
+                    payload = cig._build_payload("A printed poster", "1024x1024", "png", model, refs=refs)
+                    image, metadata = self._generate(payload)
+                    self.assertEqual(image, b"\x89PNG\r\n\x1a\nfixture-image")
+                    self.assertEqual(metadata["status"], "completed")
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(requests[0]["model"], model)
+                    self.assertEqual(requests[0]["reasoning"], {"summary": "auto"})
+                    self.assertNotIn('"effort"', json.dumps(requests[0]))
+                    self.assertNotIn('"complexity"', json.dumps(requests[0]))
+                    self.assertEqual(requests[0]["tools"][0]["output_format"], "png")
+                    content = requests[0]["input"][0]["content"]
+                    self.assertEqual(content[-1]["type"], "input_text")
+                    self.assertEqual(any(part["type"] == "input_image" for part in content), bool(refs))
+
+    def test_explicit_efforts_reproduce_the_observed_provider_failures(self):
+        for effort in ("low", "medium", "high"):
+            with self.subTest(effort=effort), self._provider():
+                payload = cig._build_payload("A printed poster", "1024x1024", "png", "gpt-5.4")
+                payload["reasoning"]["effort"] = effort
+                with self.assertRaisesRegex(cig.GatewayError, f"backend failed mid-generation: Complexity '{effort}' is not supported for this image model"):
+                    self._generate(payload)
 
 
 class StylesAlias(unittest.TestCase):

@@ -674,7 +674,9 @@ def _build_payload(
         "tool_choice": tool_choice,
         "parallel_tool_calls": False,
         "store": False,
-        "reasoning": {"effort": "low", "summary": "auto"},
+        # Explicit reasoning effort is forwarded as image complexity, which the
+        # provider may reject. Leave effort unset and retain its own default.
+        "reasoning": {"summary": "auto"},
         "include": ["reasoning.encrypted_content"],
         "text": {"verbosity": "low"},
     }
